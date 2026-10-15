@@ -2,14 +2,13 @@ import os
 import re
 import sqlite3
 import hashlib
-from datetime import datetime
 
 import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
 from PyPDF2 import PdfReader
 
-load_dotenv()
+load_dotenv(override=True)
 st.set_page_config(page_title="AI Mock Interview Platform", page_icon="🎯", layout="wide")
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -35,7 +34,7 @@ def get_db():
 
 DB = get_db()
 DEFAULTS = {
-    "resume_hash": None, "resume_text": "", "detected_skills": "",
+    "resume_hash": None, "resume_text": "", "detected_skills": "", "skills_input": "",
     "ats_result": "", "questions": [], "current_question": 0,
     "answers": [], "interview_started": False, "evaluation_done": False,
     "last_feedback": "", "overall_report": "", "learning_roadmap": "",
@@ -55,7 +54,10 @@ def ask_groq(prompt, system="You are a helpful, precise technical interviewer.")
         messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         temperature=0.2,
     )
-    return (response.choices[0].message.content or "").strip()
+    result = (response.choices[0].message.content or "").strip()
+    if not result:
+        raise RuntimeError("Groq returned an empty response. Try again or select another supported model.")
+    return result
 
 
 def reset_interview():
@@ -125,6 +127,12 @@ Interview evidence:\n{answers}"""
 st.sidebar.title("🎯 AI Interviewer")
 st.sidebar.write("Practice for placements with AI-powered interviews.")
 st.sidebar.caption(f"Model: {MODEL}")
+if st.sidebar.button("Test Groq Connection"):
+    try:
+        answer = ask_groq("Reply with exactly: API Working")
+        st.sidebar.success(f"Groq response: {answer}")
+    except Exception as exc:
+        st.sidebar.error(f"Groq connection failed: {exc}")
 st.title("AI Mock Interview Platform")
 st.header("Placement Preparation Platform")
 if not API_KEY:
@@ -144,6 +152,7 @@ if uploaded_file is not None:
             st.session_state.resume_text = text
             st.session_state.resume_hash = file_hash
             st.session_state.detected_skills = ""
+            st.session_state.skills_input = ""
             st.session_state.ats_result = ""
             reset_interview()
         except Exception as exc:
@@ -151,22 +160,33 @@ if uploaded_file is not None:
     if st.session_state.resume_text:
         st.success("✅ Resume uploaded successfully")
         if st.button("Analyze Resume and Extract Skills"):
+            # Independent calls: ATS failure cannot prevent skills extraction.
+            try:
+                with st.spinner("Extracting technical skills..."):
+                    extracted = ask_groq(
+                        "Extract ONLY technical skills explicitly present in the resume. "
+                        "Include programming languages, frameworks, databases, tools, "
+                        "and technical concepts. Return ONLY a comma-separated list "
+                        "with no headings or extra text.\nResume:\n"
+                        + st.session_state.resume_text[:8000]
+                    )
+                    st.session_state.detected_skills = extracted
+                    st.session_state.skills_input = extracted
+                st.success("Technical skills extracted successfully!")
+            except Exception as exc:
+                st.error(f"Skill Extraction Error: {exc}")
+
             try:
                 with st.spinner("Analyzing resume..."):
                     st.session_state.ats_result = ask_groq(
-                        "Evaluate this resume for software engineering placements. Return an "
-                        "estimated ATS Score (0-100), Strengths, Weaknesses, Missing Keywords. "
-                        "This is an advisory estimate, not a real ATS system.\nResume:\n"
+                        "Evaluate this resume for software engineering placements. Return "
+                        "an estimated ATS Score (0-100), Strengths, Weaknesses, and "
+                        "Missing Keywords. This is an advisory estimate, not a real "
+                        "ATS system.\nResume:\n"
                         + st.session_state.resume_text[:5000]
                     )
-                    st.session_state.detected_skills = ask_groq(
-                        "Extract ONLY technical skills explicitly present in this resume. "
-                        "Return ONLY a comma-separated list, no headings or commentary.\nResume:\n"
-                        + st.session_state.resume_text[:8000]
-                    )
-                    st.session_state["skills_input"] = st.session_state.detected_skills
             except Exception as exc:
-                st.error(f"Resume Analysis / Skill Extraction Error: {exc}")
+                st.warning(f"ATS Analysis Error: {exc}")
         if st.session_state.ats_result:
             st.subheader("📄 ATS Resume Analysis")
             st.write(st.session_state.ats_result)
@@ -176,7 +196,7 @@ else:
         st.session_state.resume_text = ""
         st.session_state.detected_skills = ""
         st.session_state.ats_result = ""
-        st.session_state.pop("skills_input", None)
+        st.session_state.skills_input = ""
         reset_interview()
 
 if "skills_input" not in st.session_state:
