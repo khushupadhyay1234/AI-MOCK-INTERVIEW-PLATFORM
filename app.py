@@ -46,18 +46,48 @@ for key, value in DEFAULTS.items():
 
 
 def ask_groq(prompt, system="You are a helpful, precise technical interviewer."):
+    """Call Groq, retrying with a second supported GPT-OSS model for empty output.
+
+    API errors are intentionally surfaced rather than mistaken for empty output.
+    """
     if not API_KEY:
         raise RuntimeError("GROQ_API_KEY is missing. Add it to your .env file and restart Streamlit.")
+
     client = Groq(api_key=API_KEY)
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        temperature=0.2,
-    )
-    result = (response.choices[0].message.content or "").strip()
-    if not result:
-        raise RuntimeError("Groq returned an empty response. Try again or select another supported model.")
-    return result
+    fallback = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-120b").strip()
+    candidates = list(dict.fromkeys([MODEL, fallback]))
+    diagnostics = []
+
+    for model_id in candidates:
+        options = {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "max_completion_tokens": 4096,
+            "temperature": 0.2,
+        }
+        if model_id.startswith("openai/gpt-oss-"):
+            options["reasoning_effort"] = "low"
+            options["include_reasoning"] = False
+
+        # Only retry on successful API responses that contain no usable text.
+        # Authentication, access, and rate-limit failures should be displayed as-is.
+        response = client.chat.completions.create(**options)
+        if not response.choices:
+            diagnostics.append(f"{model_id}: no choices returned")
+            continue
+        choice = response.choices[0]
+        result = (choice.message.content or "").strip()
+        if result:
+            return result
+        diagnostics.append(
+            f"{model_id}: empty content, finish_reason={choice.finish_reason}, "
+            f"usage={response.usage}"
+        )
+
+    raise RuntimeError("Groq returned empty responses: " + " | ".join(diagnostics))
 
 
 def reset_interview():
